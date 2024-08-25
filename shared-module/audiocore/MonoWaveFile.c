@@ -16,9 +16,9 @@
 #include "shared-module/audiocore/MonoWaveFile.h"
 
 // Simplified version of WaveFile.
-// - Only supports 8bit mono files
+// - Only 8bit mono files
 // - Static buffer size
-// - Suports adjustable playback speed, up to double speed
+// - Adjustable playback speed, up to double
 
 #define BITS_PER_SAMPLE 8
 #define MAX_BUFFER_LENGTH 256
@@ -40,19 +40,19 @@ void common_hal_audioio_monowavefile_set_speed(audioio_monowavefile_obj_t *self,
   if (speed > 2) {
     speed = 2;
   }
-  if (speed < 0) {
+  if (speed <= 0.1) {
     speed = 0.1;
   }
 
   LOG("MonoWaveFile: Setting speed: %f\n", (double)speed);
-  self->stretch_factor = 1 / speed;
+  self->speed = speed;
 }
 
 void common_hal_audioio_monowavefile_construct(audioio_monowavefile_obj_t *self,
                                                pyb_file_obj_t *file,
                                                uint8_t *buffer,
                                                size_t _buffer_size) {
-  self->stretch_factor = 1.;
+  self->speed = 1.;
   // Load the wave
   self->file.handle = file;
   uint8_t chunk_header[16];
@@ -195,7 +195,7 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
   const uint32_t bytes_to_read =
       (MAX_BUFFER_LENGTH > self->file.bytes_remaining)
           ? self->file.bytes_remaining
-          : (self->stretch_factor * MAX_BUFFER_LENGTH);
+          : (self->speed * MAX_BUFFER_LENGTH);
 
   LOG("bytes_to_read: %u\n", bytes_to_read);
 
@@ -212,7 +212,7 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
 
   uint32_t target_index = 0;
   for (; target_index < MAX_BUFFER_LENGTH; ++target_index) {
-    const uint32_t source_index = target_index * self->stretch_factor;
+    const uint32_t source_index = target_index * self->speed;
     if (source_index >= read_count) {
       break;
     }
