@@ -32,6 +32,7 @@ typedef struct {
   uint16_t buffer_index;
 
   uint32_t sample_rate;
+  uint8_t bits_per_sample;
   float speed;
 
 } audioio_monowavefile_obj_t;

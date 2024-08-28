@@ -16,14 +16,14 @@
 #include "shared-module/audiocore/MonoWaveFile.h"
 
 // Simplified version of WaveFile.
-// - Only 8bit mono files
 // - Static buffer size
 // - Adjustable playback speed, up to double
 
-#define BITS_PER_SAMPLE 8
-#define MAX_BUFFER_LENGTH 256
+#define MAX_BUFFER_BYTES 512
 
-#define LOG(...) mp_printf(&mp_plat_print, __VA_ARGS__);
+// #define LOG(...) mp_printf(&mp_plat_print, __VA_ARGS__);
+#define LOG(...)
+
 
 struct wave_format_chunk {
   uint16_t audio_format;
@@ -81,12 +81,13 @@ void common_hal_audioio_monowavefile_construct(audioio_monowavefile_obj_t *self,
   }
 
   if (format.audio_format != 1 || format.num_channels > 1 ||
-      format.bits_per_sample != 8 ||
+      (format.bits_per_sample != 8 && format.bits_per_sample != 16) ||
       (format_size == 18 && format.extra_params != 0)) {
     mp_raise_ValueError(MP_ERROR_TEXT("Unsupported format"));
   }
   // Get the sample_rate
   self->sample_rate = format.sample_rate;
+  self->bits_per_sample = format.bits_per_sample;
 
   // TODO(tannewt): Skip any extra chunks that occur before the data section.
 
@@ -108,18 +109,18 @@ void common_hal_audioio_monowavefile_construct(audioio_monowavefile_obj_t *self,
   self->file.length = data_length;
   self->file.data_start = fp->fptr;
 
-  self->buffer1.data = m_malloc(MAX_BUFFER_LENGTH);
-  self->buffer1.length = MAX_BUFFER_LENGTH;
+  self->buffer1.data = m_malloc(MAX_BUFFER_BYTES);
+  self->buffer1.length = MAX_BUFFER_BYTES;
   if (self->buffer1.data == NULL) {
     common_hal_audioio_monowavefile_deinit(self);
-    m_malloc_fail(MAX_BUFFER_LENGTH);
+    m_malloc_fail(MAX_BUFFER_BYTES);
   }
 
-  self->buffer2.data = m_malloc(MAX_BUFFER_LENGTH);
-  self->buffer2.length = MAX_BUFFER_LENGTH;
+  self->buffer2.data = m_malloc(MAX_BUFFER_BYTES);
+  self->buffer2.length = MAX_BUFFER_BYTES;
   if (self->buffer2.data == NULL) {
     common_hal_audioio_monowavefile_deinit(self);
-    m_malloc_fail(MAX_BUFFER_LENGTH);
+    m_malloc_fail(MAX_BUFFER_BYTES);
   }
 }
 
@@ -145,7 +146,7 @@ void common_hal_audioio_monowavefile_set_sample_rate(
 
 uint8_t common_hal_audioio_monowavefile_get_bits_per_sample(
     audioio_monowavefile_obj_t *self) {
-  return BITS_PER_SAMPLE;
+  return self->bits_per_sample;
 }
 
 uint8_t common_hal_audioio_monowavefile_get_channel_count(
@@ -162,10 +163,20 @@ void audioio_monowavefile_reset_buffer(audioio_monowavefile_obj_t *self,
   f_lseek(&self->file.handle->fp, self->file.data_start);
 }
 
-static uint32_t add_padding(uint8_t *buffer, UINT length_read) {
+static uint32_t add_padding(uint8_t *buffer, uint8_t bits_per_sample,
+                            UINT length_read) {
   const uint32_t pad_count = length_read % sizeof(uint32_t);
-  for (uint32_t i = 0; i < pad_count; i++) {
-    ((uint8_t *)(buffer))[length_read / sizeof(uint8_t) - i - 1] = 0x80;
+  if (bits_per_sample == 8) {
+    for (uint32_t i = 0; i < pad_count; i++) {
+      ((uint8_t *)buffer)[length_read / sizeof(uint8_t) - i - 1] = 0x80;
+    }
+  } else if (bits_per_sample == 16) {
+// We know the buffer is aligned because we allocated it onto the heap
+// ourselves.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+    ((int16_t *)buffer)[length_read / sizeof(int16_t) - 1] = 0;
+#pragma GCC diagnostic pop
   }
 
   return pad_count;
@@ -184,6 +195,8 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
     audioio_monowavefile_obj_t *self, const bool _single_channel_output,
     uint8_t _channel, uint8_t **buffer, uint32_t *buffer_length) {
 
+  const uint32_t bytes_per_sample = self->bits_per_sample / 8;
+
   if (self->file.bytes_remaining == 0) {
     *buffer = NULL;
     *buffer_length = 0;
@@ -192,15 +205,14 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
 
   struct Buffer *target_buffer = get_indexed_buffer(self, self->buffer_index);
 
-  const uint32_t bytes_to_read =
-      (MAX_BUFFER_LENGTH > self->file.bytes_remaining)
-          ? self->file.bytes_remaining
-          : (self->speed * MAX_BUFFER_LENGTH);
+  const uint32_t bytes_to_read = (MAX_BUFFER_BYTES > self->file.bytes_remaining)
+                                     ? self->file.bytes_remaining
+                                     : (self->speed * MAX_BUFFER_BYTES);
 
   LOG("bytes_to_read: %u\n", bytes_to_read);
 
   UINT read_count;
-  uint8_t bytes[MAX_BUFFER_LENGTH * 2];
+  uint8_t bytes[MAX_BUFFER_BYTES * 2];
   const bool read_result =
       f_read(&self->file.handle->fp, bytes, bytes_to_read, &read_count);
   if (read_result != FR_OK || read_count != bytes_to_read) {
@@ -210,25 +222,35 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
   self->file.bytes_remaining -= read_count;
   LOG("bytes remaining: %u\n", self->file.bytes_remaining);
 
-  uint32_t target_index = 0;
-  for (; target_index < MAX_BUFFER_LENGTH; ++target_index) {
-    const uint32_t source_index = target_index * self->speed;
-    if (source_index >= read_count) {
+  uint32_t target_sample_index = 0;
+  const uint32_t max_samples = MAX_BUFFER_BYTES / bytes_per_sample;
+  for (; target_sample_index < max_samples;
+       target_sample_index += bytes_per_sample) {
+    const uint32_t source_sample_index = target_sample_index * self->speed;
+    if (source_sample_index * bytes_per_sample >= read_count) {
       break;
     }
 
-    target_buffer->data[target_index] = bytes[source_index];
+    if (self->bits_per_sample == 8) {
+      target_buffer->data[target_sample_index] = bytes[source_sample_index];
+    } else {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+      ((uint16_t *)target_buffer->data)[target_sample_index] =
+          ((uint16_t *)bytes)[source_sample_index];
+#pragma GCC diagnostic pop
+    }
   }
 
-  target_buffer->length = target_index;
+  target_buffer->length = target_sample_index * bytes_per_sample;
 
   // Pad the last buffer to word align it.
   const bool is_last_buffer = self->file.bytes_remaining == 0 &&
                               target_buffer->length % sizeof(uint32_t) != 0;
   if (is_last_buffer) {
     LOG("Padding last buffer\n");
-    target_buffer->length +=
-        add_padding(target_buffer->data, target_buffer->length);
+    target_buffer->length += add_padding(
+        target_buffer->data, self->bits_per_sample, target_buffer->length);
   }
 
   struct Buffer *out_buffer = get_indexed_buffer(self, self->buffer_index + 1);
@@ -252,7 +274,7 @@ void audioio_monowavefile_get_buffer_structure(audioio_monowavefile_obj_t *self,
   *single_buffer = false;
   // In WAV files, 8-bit samples are always unsigned, and larger samples are
   // always signed.
-  *samples_signed = false;
+  *samples_signed = self->bits_per_sample > 8;
   *max_buffer_length = 512;
   *spacing = 1;
 }
