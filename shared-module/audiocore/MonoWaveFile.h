@@ -13,7 +13,7 @@
 
 typedef struct Buffer {
   uint8_t *data;
-  uint32_t length;
+  // uint32_t length;
 } Buffer;
 
 typedef struct FileReader {
