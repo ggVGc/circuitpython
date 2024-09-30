@@ -19,10 +19,11 @@
 // - Static buffer size
 // - Adjustable playback speed, up to double
 
-#define MAX_SAMPLES 256
+#define MAX_SAMPLES 64
+#define MAX_SPEED_MULTIPLIER 2
 
-#define LOG(...) mp_printf(&mp_plat_print, __VA_ARGS__);
-// #define LOG(...)
+// #define LOG(...) mp_printf(&mp_plat_print, __VA_ARGS__);
+#define LOG(...)
 
 struct wave_format_chunk {
   uint16_t audio_format;
@@ -36,8 +37,8 @@ struct wave_format_chunk {
 
 void common_hal_audioio_monowavefile_set_speed(audioio_monowavefile_obj_t *self,
                                                float speed) {
-  if (speed > 2) {
-    speed = 2;
+  if (speed > MAX_SPEED_MULTIPLIER) {
+    speed = MAX_SPEED_MULTIPLIER;
   }
   if (speed <= 0.1) {
     speed = 0.1;
@@ -213,7 +214,7 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
   LOG("bytes_to_read: %u\n", bytes_to_read);
 
   UINT bytes_read_count;
-  uint8_t bytes[max_buffer_bytes * 2];
+  uint8_t bytes[bytes_to_read * MAX_SPEED_MULTIPLIER];
 
   const bool read_result =
       f_read(&self->file.handle->fp, bytes, bytes_to_read, &bytes_read_count);
@@ -225,27 +226,27 @@ audioio_get_buffer_result_t audioio_monowavefile_get_buffer(
 
   LOG("bytes remaining: %u\n", self->file.bytes_remaining);
 
-  uint32_t target_sample_index = 0;
+  uint32_t target_byte_index = 0;
   const uint32_t max_samples = max_buffer_bytes / bytes_per_sample;
-  for (; target_sample_index < max_samples;
-       target_sample_index += bytes_per_sample) {
-    const uint32_t source_sample_index = target_sample_index * self->speed;
-    if (source_sample_index * bytes_per_sample >= bytes_read_count) {
+  for (; target_byte_index < max_samples;
+       target_byte_index += bytes_per_sample) {
+    const uint32_t source_byte_index = target_byte_index * self->speed;
+    if (source_byte_index * bytes_per_sample >= bytes_read_count) {
       break;
     }
 
     if (self->bits_per_sample == 8) {
-      target_buffer->data[target_sample_index] = bytes[source_sample_index];
+      target_buffer->data[target_byte_index] = bytes[source_byte_index];
     } else {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-align"
-      ((uint16_t *)target_buffer->data)[target_sample_index] =
-          ((uint16_t *)bytes)[source_sample_index];
+      ((uint16_t *)target_buffer->data)[target_byte_index] =
+          ((uint16_t *)bytes)[source_byte_index];
 #pragma GCC diagnostic pop
     }
   }
 
-  uint32_t target_buf_len = target_sample_index * bytes_per_sample;
+  uint32_t target_buf_len = target_byte_index * bytes_per_sample;
 
   // Pad the last buffer to word align it.
   const bool is_last_buffer =
@@ -278,6 +279,7 @@ void audioio_monowavefile_get_buffer_structure(audioio_monowavefile_obj_t *self,
   // In WAV files, 8-bit samples are always unsigned, and larger samples are
   // always signed.
   *samples_signed = self->bits_per_sample > 8;
-  *max_buffer_length = 512;
+  const uint32_t bytes_per_sample = self->bits_per_sample / 8;
+  *max_buffer_length = MAX_SAMPLES * bytes_per_sample;
   *spacing = 1;
 }
