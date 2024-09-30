@@ -616,6 +616,7 @@ SRC_SHARED_MODULE_ALL = \
 	atexit/__init__.c \
 	audiocore/RawSample.c \
 	audiocore/WaveFile.c \
+	audiocore/MonoWaveFile.c \
 	audiocore/__init__.c \
 	audioio/__init__.c \
 	audiomixer/Mixer.c \
